@@ -2,9 +2,10 @@
 // PolyForm Noncommercial License 1.0.0: not for sale, and this notice stays in every copy.
 //
 // Game Vault · Flash: plays a Flash game (.swf) on the Xbox with Ruffle (ruffle.rs, MIT / Apache-2.0), the Flash
-// Player emulator, in the console's WebView2. Game Vault starts it with gamevault-flash:?file=<path of the .swf>.
-// Every file the page asks for comes through WebResourceRequested at https://flash.gamevault/ : the page and Ruffle
-// from the package's "web" folder, /game.swf from the game's path (USB drive or Game Vault's folders). The
+// Player emulator, in the console's WebView2. Game Vault starts it with gamevault-flash:?file=<path of the .swf>
+// [&base=<the game's folder>]. Every file the page asks for comes through WebResourceRequested at
+// https://flash.gamevault/ : the page and Ruffle from the package's "web" folder, /game.swf from the game's path (USB
+// drive or Game Vault's folders), and every other file the game loads from its folder (base=, else the .swf's). The
 // controller is read here and sent to the page each frame (web/page.js turns it into keys and a mouse).
 // View + Menu held goes back to Game Vault.
 
@@ -41,6 +42,7 @@ namespace {
 const wchar_t kHost[] = L"https://flash.gamevault";
 
 std::wstring g_game;     // the .swf
+std::wstring g_base;     // the game's folder: its other files (more .swf, sounds, data) come from here (0.1.0.9)
 std::wstring g_logPath;  // LocalState\flash.log
 
 void Log(const std::wstring& line)
@@ -125,6 +127,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (args.Kind() == ActivationKind::Protocol) {
             Uri uri = args.as<ProtocolActivatedEventArgs>().Uri();
             g_game = QueryValue(uri, L"file");
+            g_base = QueryValue(uri, L"base");
             Log(L"started by " + std::wstring(uri.AbsoluteUri()));
         } else {
             Log(L"started without a game");
@@ -133,7 +136,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // no game given: the test file in the package
             g_game = std::wstring(Package::Current().InstalledLocation().Path()) + L"\\web\\test.swf";
         }
-        Log(L"game: " + g_game);
+        // (without base=, the .swf's own folder: a game made of several files finds the others next to it)
+        if (g_base.empty()) g_base = g_game.substr(0, g_game.find_last_of(L'\\'));
+        while (!g_base.empty() && (g_base.back() == L'\\' || g_base.back() == L'/')) g_base.pop_back();
+        Log(L"game: " + g_game + L" (its files from " + g_base + L")");
         m_window.Activate();
         if (m_started) {
             if (m_web) m_web.Reload();   // another game while running
@@ -215,8 +221,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (path == L"/game.swf") {
             file = g_game;
         } else if (path.find(L"..") == std::wstring::npos) {
-            file = std::wstring(Package::Current().InstalledLocation().Path()) + L"\\web";
-            for (wchar_t c : path) file += c == L'/' ? L'\\' : c;
+            // the page and Ruffle from the package; anything else the game asks for ("newfades/184.swf",
+            // "sounds/hit.mp3", "data.xml") from the game's folder, as Flash read it next to the projector (0.1.0.9:
+            // before, those came from the package too and multi-file games could not load their parts)
+            std::wstring decoded = std::wstring(Uri::UnescapeComponent(path));
+            std::wstring rel;
+            for (wchar_t c : decoded) rel += c == L'/' ? L'\\' : c;
+            bool ours = path == L"/" || path == L"/index.html" || path == L"/page.js" || path.rfind(L"/ruffle/", 0) == 0;
+            if (ours || g_base.empty()) {
+                file = std::wstring(Package::Current().InstalledLocation().Path()) + L"\\web" + rel;
+            } else {
+                file = g_base + rel;
+            }
         }
         Windows::Storage::Streams::IRandomAccessStream stream{ nullptr };
         try {
